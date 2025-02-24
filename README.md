@@ -1,131 +1,65 @@
-# ML-Predicted Interface Boundary Conditions for Domain Decomposition
+# Learning Interface Conditions for Subdomain Decomposition
 
-This project implements a machine learning approach to predict interface boundary conditions when solving partial differential equations (PDEs) using domain decomposition. The focus is on the Poisson equation, but the methodology can be extended to other PDEs.
-
-## Overview
-
-The project uses domain decomposition to split a large PDE problem into smaller subdomains, making the solution process more efficient. Machine learning is used to predict the boundary conditions at the interfaces between subdomains, enabling parallel computation and reducing the overall computational cost.
-
-### Key Features
-
-- Implementation of the Poisson equation solver using finite differences
-- Domain decomposition with ML-predicted interface conditions
-- CNN-based model for predicting interface values
-- Comprehensive data generation and training pipeline
-- Evaluation tools and visualization capabilities
+This project explores machine learning approaches for predicting interface conditions between subdomains in partial differential equation (PDE) solvers. The goal is to accelerate PDE solutions by using ML to predict interface conditions between subdomains.
 
 ## Project Structure
 
-```
-.
-├── README.md
-├── requirements.txt
-├── pde_solver.py        # PDE solver implementation
-├── data_generator.py    # Training data generation
-├── ml_model.py         # Neural network model
-└── experiments.py      # Experiment runner and evaluation
-```
+The project is organized into three versions, each representing a different approach:
 
-## Installation
+### [Version 1](v1/): Basic Interface Prediction
 
-1. Clone the repository:
-```bash
-git clone [repository-url]
-cd [repository-name]
-```
+- Initial implementation of interface prediction
+- Uses analytical solutions for training
+- Simple neural network architecture
+- No subdomain solution integration
 
-2. Create a virtual environment (optional but recommended):
-```bash
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
+### [Version 2](v2/): Subdomain Integration
 
-3. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
+- Enhanced data generation with analytical solutions
+- Variable theta (diffusion coefficient)
+- Integration with subdomain solutions
+- Comparison with direct solutions
+- Support for in-distribution and out-of-distribution testing
 
-## Usage
+### [Version 3](v3/): Low-K Numerical Solutions
 
-### Running Experiments
+- Constant theta=1 for all cases
+- Focus on low wavenumber (k=2.0 to 4.5)
+- Uses numerical solutions instead of analytical solutions
+- Integrated data generation during training
+- Comprehensive testing across different k values
 
-The main experiment script can be run with:
+## Common Components
 
-```bash
-python experiments.py
-```
+- `pde_solver.py`: Implementation of the Poisson equation solver
+- Data generators: Create training and test data
+- ML models: Neural networks for interface prediction
+- Test scripts: Evaluate model performance
 
-This will:
-1. Generate training data
-2. Train the ML model
-3. Run a convergence study
-4. Visualize results
+## Key Findings
 
-### Custom Usage
+1. ML-based interface prediction can achieve similar or better accuracy compared to direct solutions
+2. The subdomain approach shows more consistent performance across different problem parameters
+3. ML solutions typically converge more reliably than direct solvers in challenging cases
+4. The approach is particularly effective for low wavenumber cases with constant diffusion coefficients
 
-You can also use individual components:
+## Getting Started
 
-```python
-from pde_solver import PoissonSolver
-from data_generator import DataGenerator
-from ml_model import InterfacePredictor
-from experiments import Experiment
+Each version directory contains its own README with specific instructions. In general:
 
-# Initialize experiment
-exp = Experiment(nx=40, ny=40, n_subdomains=(2, 2))
+1. Navigate to the desired version directory
+2. Install dependencies: `pip install -r requirements.txt`
+3. Run the training script
+4. Run the test script to evaluate performance
 
-# Train model
-exp.train_model(n_samples=1000, n_epochs=100)
+## Requirements
 
-# Solve a problem with ML-predicted interface conditions
-theta, f = exp.data_generator.generate_random_problem()
-bc_dict = exp.data_generator.generate_boundary_conditions()
-solution, error = exp.solve_with_ml_interface(theta, f, bc_dict)
-```
-
-## Implementation Details
-
-### PDE Solver
-
-- Implements both full-domain and subdomain solvers
-- Uses Jacobi iteration for solving the Poisson equation
-- Handles various boundary condition types
-
-### Data Generator
-
-- Generates random PDE problems for training
-- Extracts interface data from full-domain solutions
-- Provides utilities for boundary condition generation
-
-### ML Model
-
-- CNN-based architecture for interface prediction
-- Processes local context around interfaces
-- Trained using MSE loss
-- Includes data preprocessing and batch preparation
-
-### Experiments
-
-- Provides tools for model evaluation
-- Implements convergence studies
-- Includes visualization utilities
-
-## Results
-
-The project demonstrates:
-- Accurate prediction of interface boundary conditions
-- Efficient domain decomposition
-- Reduced computational cost compared to full-domain solving
-- Good convergence properties
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+- Python 3.6+
+- PyTorch
+- NumPy
+- Matplotlib
+- Seaborn (for visualization)
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Acknowledgments
-
-This project is based on research in domain decomposition methods and machine learning applications in scientific computing. 
+[MIT License](LICENSE) 

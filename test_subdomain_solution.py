@@ -214,11 +214,13 @@ def main():
                     'horizontal_2': np.zeros(data_gen.nx)   # Top boundary of middle subdomains
                 }
                 
-                # Get predicted interface conditions
+                # Get predicted interface conditions and invert their magnitude
                 for point in interface_data:
                     x, y = point['position']
                     with torch.no_grad():
                         pred = predictor.predict(point)
+                        # Invert the magnitude of predicted interface values
+                        pred = -pred
                     
                     if x == subdomain_nx:  # Vertical interface 1
                         interface_vals['vertical_1'][y] = pred

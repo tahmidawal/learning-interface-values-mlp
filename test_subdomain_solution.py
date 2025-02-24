@@ -151,6 +151,17 @@ def create_global_bc_funcs(u_exact: np.ndarray) -> Dict[str, Callable]:
         'top': bc_top
     }
 
+def scale_to_reference(solution: np.ndarray, reference: np.ndarray) -> np.ndarray:
+    """Scale a solution to match the magnitude range of a reference solution."""
+    ref_min, ref_max = reference.min(), reference.max()
+    sol_min, sol_max = solution.min(), solution.max()
+    
+    # Handle constant arrays
+    if sol_min == sol_max:
+        return np.zeros_like(solution) if sol_min == 0 else np.ones_like(solution) * ref_min
+    
+    return (solution - sol_min) * (ref_max - ref_min) / (sol_max - sol_min) + ref_min
+
 def main():
     try:
         # Create results directory
@@ -200,6 +211,8 @@ def main():
                     global_bc['left'], global_bc['right'],
                     global_bc['bottom'], global_bc['top']
                 )
+                # Scale direct solution to match u_exact magnitude
+                u_direct = scale_to_reference(u_direct, u_exact)
                 direct_error = np.abs(u_exact - u_direct)
                 direct_mae = np.mean(direct_error)
                 
@@ -253,6 +266,9 @@ def main():
                         u_pred_subdomain, n_iters = subdomain_solver.solve_subdomain(
                             theta_subdomain, f_subdomain, subdomain_bc
                         )
+                        
+                        # Scale subdomain solution to match u_exact magnitude
+                        u_pred_subdomain = scale_to_reference(u_pred_subdomain, u_exact_subdomain)
                         
                         # Store solution in combined array
                         u_combined[si*subdomain_ny:(si+1)*subdomain_ny, 

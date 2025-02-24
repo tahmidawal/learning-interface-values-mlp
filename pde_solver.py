@@ -3,7 +3,7 @@ from typing import Tuple, Optional, Callable
 
 class PoissonSolver:
     """
-    A class to solve the Poisson equation: -∇·(θ∇u) = f
+    A class to solve the Poisson equation: ∇·(θ∇u) = f
     Implements both full domain and subdomain solvers using finite differences.
     All input and output values are expected to be scaled between -1 and 1.
     """
@@ -77,11 +77,11 @@ class PoissonSolver:
                     theta_avg_y_m = (theta[i,j] + theta[i-1,j])/2
                     
                     # Scale the coefficients to maintain solution scale
-                    scale = (theta_avg_x + theta_avg_x_m)/dx2 + (theta_avg_y + theta_avg_y_m)/dy2
+                    scale = -(theta_avg_x + theta_avg_x_m)/dx2 - (theta_avg_y + theta_avg_y_m)/dy2
                     
                     u[i,j] = (
-                        (theta_avg_x * u_old[i,j+1] + theta_avg_x_m * u_old[i,j-1])/dx2 +
-                        (theta_avg_y * u_old[i+1,j] + theta_avg_y_m * u_old[i-1,j])/dy2 +
+                        -(theta_avg_x * u_old[i,j+1] + theta_avg_x_m * u_old[i,j-1])/dx2 -
+                        (theta_avg_y * u_old[i+1,j] + theta_avg_y_m * u_old[i-1,j])/dy2 -
                         f[i,j]
                     ) / scale
             
@@ -141,11 +141,11 @@ class PoissonSolver:
                     theta_avg_y_m = (theta[i,j] + theta[i-1,j])/2
                     
                     # Scale the coefficients to maintain solution scale
-                    scale = (theta_avg_x + theta_avg_x_m)/dx2 + (theta_avg_y + theta_avg_y_m)/dy2
+                    scale = -(theta_avg_x + theta_avg_x_m)/dx2 - (theta_avg_y + theta_avg_y_m)/dy2
                     
                     u[i,j] = (
-                        (theta_avg_x * u_old[i,j+1] + theta_avg_x_m * u_old[i,j-1])/dx2 +
-                        (theta_avg_y * u_old[i+1,j] + theta_avg_y_m * u_old[i-1,j])/dy2 +
+                        -(theta_avg_x * u_old[i,j+1] + theta_avg_x_m * u_old[i,j-1])/dx2 -
+                        (theta_avg_y * u_old[i+1,j] + theta_avg_y_m * u_old[i-1,j])/dy2 -
                         f[i,j]
                     ) / scale
             

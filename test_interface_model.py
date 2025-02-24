@@ -5,6 +5,24 @@ from ml_model_v2 import InterfacePredictorV2
 import torch
 from typing import Dict, List, Tuple
 import seaborn as sns
+import os
+
+def unscale_value(value: float, scale_min: float, scale_max: float,
+                  target_min: float, target_max: float) -> float:
+    """
+    Unscale a value from the scaled range back to the original range.
+    
+    Args:
+        value: Scaled value between scale_min and scale_max
+        scale_min: Minimum of the scaled range
+        scale_max: Maximum of the scaled range
+        target_min: Minimum of the original range
+        target_max: Maximum of the original range
+    
+    Returns:
+        float: Unscaled value in the original range
+    """
+    return (value - scale_min) * (target_max - target_min) / (scale_max - scale_min) + target_min
 
 def plot_solution_comparison(true_solution: np.ndarray, predicted_solution: np.ndarray,
                            title: str = "Solution Comparison"):
@@ -31,96 +49,84 @@ def plot_solution_comparison(true_solution: np.ndarray, predicted_solution: np.n
     plt.tight_layout()
     plt.show()
 
-def plot_interface_predictions(predictor: InterfacePredictorV2, test_data: List[Dict],
-                             n_samples: int = 5):
-    """Plot interface predictions for a few test cases."""
-    for i in range(n_samples):
-        problem = test_data[i]
-        solution = problem['solution']
-        
-        # Separate vertical and horizontal interface points
-        vertical_points = []
-        horizontal_points = []
-        
-        for interface_point in problem['interface_data']:
-            x, y = interface_point['position']
-            pred = predictor.predict(interface_point)
-            true = interface_point['target']
-            
-            if interface_point['type'] == 'vertical':
-                vertical_points.append((y, true, pred))  # y-position, true value, predicted value
-            else:
-                horizontal_points.append((x, true, pred))  # x-position, true value, predicted value
-        
-        # Create figure with subplots
-        fig = plt.figure(figsize=(15, 10))
-        
-        # Plot vertical interfaces
-        if vertical_points:
-            ax1 = plt.subplot(221)
-            # Sort by y-position
-            vertical_points.sort(key=lambda x: x[0])
-            y_pos, true_vals, pred_vals = zip(*vertical_points)
-            
-            ax1.plot(y_pos, true_vals, '-', label='True', linewidth=2)
-            ax1.plot(y_pos, pred_vals, '--', label='Predicted', linewidth=2)
-            ax1.set_xlabel('Y Position')
-            ax1.set_ylabel('Interface Value')
-            ax1.set_title('Vertical Interface Values')
-            ax1.legend()
-            ax1.grid(True)
-        
-        # Plot horizontal interfaces
-        if horizontal_points:
-            ax2 = plt.subplot(222)
-            # Sort by x-position
-            horizontal_points.sort(key=lambda x: x[0])
-            x_pos, true_vals, pred_vals = zip(*horizontal_points)
-            
-            ax2.plot(x_pos, true_vals, '-', label='True', linewidth=2)
-            ax2.plot(x_pos, pred_vals, '--', label='Predicted', linewidth=2)
-            ax2.set_xlabel('X Position')
-            ax2.set_ylabel('Interface Value')
-            ax2.set_title('Horizontal Interface Values')
-            ax2.legend()
-            ax2.grid(True)
-        
-        # Error distribution
-        all_errors = []
-        if vertical_points:
-            all_errors.extend([p - t for _, t, p in vertical_points])
-        if horizontal_points:
-            all_errors.extend([p - t for _, t, p in horizontal_points])
-        
-        ax3 = plt.subplot(223)
-        sns.histplot(all_errors, kde=True, ax=ax3)
-        ax3.set_title('Error Distribution')
-        ax3.set_xlabel('Error')
-        ax3.grid(True)
-        
-        # Scatter plot of predicted vs true values
-        ax4 = plt.subplot(224)
-        all_true = []
-        all_pred = []
-        if vertical_points:
-            all_true.extend([t for _, t, _ in vertical_points])
-            all_pred.extend([p for _, _, p in vertical_points])
-        if horizontal_points:
-            all_true.extend([t for _, t, _ in horizontal_points])
-            all_pred.extend([p for _, _, p in horizontal_points])
-        
-        ax4.scatter(all_true, all_pred, alpha=0.6)
-        min_val = min(min(all_true), min(all_pred))
-        max_val = max(max(all_true), max(all_pred))
-        ax4.plot([min_val, max_val], [min_val, max_val], 'r--', label='Perfect prediction')
-        ax4.set_xlabel('True Values')
-        ax4.set_ylabel('Predicted Values')
-        ax4.set_title('Predicted vs True Values')
-        ax4.legend()
-        ax4.grid(True)
-        
-        plt.suptitle(f'Interface Predictions Analysis (Sample {i+1})')
-        plt.tight_layout()
+def plot_interface_predictions(predictions: List[float], targets: List[float],
+                             positions: List[Tuple[int, int]], interface_types: List[str],
+                             scale_factors: Dict, save_path: str = None) -> None:
+    """
+    Plot interface predictions as continuous lines.
+    Data is unscaled for visualization.
+    
+    Args:
+        predictions: List of predicted values
+        targets: List of target values
+        positions: List of interface positions
+        interface_types: List of interface types
+        scale_factors: Dictionary of scaling factors
+        save_path: Path to save the plot (if None, display instead)
+    """
+    # Separate vertical and horizontal interface points
+    vertical_points = [(pos, pred, target) for pos, pred, target, itype 
+                      in zip(positions, predictions, targets, interface_types)
+                      if itype == 'vertical']
+    horizontal_points = [(pos, pred, target) for pos, pred, target, itype 
+                        in zip(positions, predictions, targets, interface_types)
+                        if itype == 'horizontal']
+    
+    # Sort points by position for continuous lines
+    vertical_points.sort(key=lambda x: x[0][1])  # Sort by y-coordinate
+    horizontal_points.sort(key=lambda x: x[0][0])  # Sort by x-coordinate
+    
+    # Unscale values for visualization
+    solution_scale = scale_factors['solution']
+    unscale_sol = lambda x: unscale_value(x, -1, 1, solution_scale['min'], solution_scale['max'])
+    
+    # Create figure with subplots
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+    
+    # Plot vertical interfaces
+    if vertical_points:
+        positions_v, preds_v, targets_v = zip(*vertical_points)
+        y_coords = [pos[1]/40 for pos in positions_v]  # Normalize to [0,1]
+        ax1.plot(y_coords, [unscale_sol(t) for t in targets_v], 'b-', label='True')
+        ax1.plot(y_coords, [unscale_sol(p) for p in preds_v], 'r--', label='Predicted')
+        ax1.set_xlabel('Normalized Y Position')
+        ax1.set_ylabel('Interface Value')
+        ax1.set_title('Vertical Interface Values')
+        ax1.grid(True)
+        ax1.legend()
+    
+    # Plot horizontal interfaces
+    if horizontal_points:
+        positions_h, preds_h, targets_h = zip(*horizontal_points)
+        x_coords = [pos[0]/40 for pos in positions_h]  # Normalize to [0,1]
+        ax2.plot(x_coords, [unscale_sol(t) for t in targets_h], 'b-', label='True')
+        ax2.plot(x_coords, [unscale_sol(p) for p in preds_h], 'r--', label='Predicted')
+        ax2.set_xlabel('Normalized X Position')
+        ax2.set_ylabel('Interface Value')
+        ax2.set_title('Horizontal Interface Values')
+        ax2.grid(True)
+        ax2.legend()
+    
+    # Plot error distribution
+    errors = np.array(predictions) - np.array(targets)
+    sns.histplot(errors, kde=True, ax=ax3)
+    ax3.set_xlabel('Prediction Error (Scaled)')
+    ax3.set_ylabel('Count')
+    ax3.set_title('Error Distribution')
+    
+    # Plot predicted vs true values
+    ax4.scatter(targets, predictions, alpha=0.5)
+    ax4.plot([-1, 1], [-1, 1], 'r--')  # Perfect prediction line
+    ax4.set_xlabel('True Values (Scaled)')
+    ax4.set_ylabel('Predicted Values (Scaled)')
+    ax4.set_title('Predicted vs True Values')
+    ax4.grid(True)
+    
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path)
+        plt.close()
+    else:
         plt.show()
 
 def analyze_error_by_position(predictor: InterfacePredictorV2, test_data: List[Dict]):
@@ -164,34 +170,39 @@ def analyze_error_by_position(predictor: InterfacePredictorV2, test_data: List[D
         plt.show()
 
 def calculate_metrics(predictions: np.ndarray, targets: np.ndarray) -> Dict[str, float]:
-    """Calculate various error metrics with better handling of relative errors."""
+    """Calculate error metrics for scaled predictions."""
     abs_errors = np.abs(predictions - targets)
+    squared_errors = (predictions - targets) ** 2
     
-    # Handle relative errors more carefully
-    rel_errors = abs_errors / (np.abs(targets) + 1e-6)  # Increased epsilon
-    rel_errors = rel_errors[np.abs(targets) > 1e-6]  # Only consider non-tiny targets
-    
-    return {
+    metrics = {
         'mae': np.mean(abs_errors),
-        'rmse': np.sqrt(np.mean(abs_errors**2)),
+        'rmse': np.sqrt(np.mean(squared_errors)),
         'max_error': np.max(abs_errors),
-        'rel_error_mean': np.mean(rel_errors),
-        'rel_error_median': np.median(rel_errors),
-        'rel_error_90th': np.percentile(rel_errors, 90),
-        'n_samples': len(predictions)
+        'mean_rel_error': np.mean(abs_errors / (np.abs(targets) + 1e-8)),
+        'median_rel_error': np.median(abs_errors / (np.abs(targets) + 1e-8)),
+        '90th_percentile_rel_error': np.percentile(abs_errors / (np.abs(targets) + 1e-8), 90)
     }
+    return metrics
 
 def analyze_by_interface_type(predictions: List[float], targets: List[float],
-                            types: List[str]) -> Dict[str, Dict[str, float]]:
-    """Analyze errors separately for vertical and horizontal interfaces."""
-    vert_pred = [p for p, t in zip(predictions, types) if t == 'vertical']
-    vert_targ = [t for t, typ in zip(targets, types) if typ == 'vertical']
-    horz_pred = [p for p, t in zip(predictions, types) if t == 'horizontal']
-    horz_targ = [t for t, typ in zip(targets, types) if typ == 'horizontal']
+                            positions: List[Tuple[int, int]], interface_types: List[str]) -> Dict:
+    """Analyze predictions separately for vertical and horizontal interfaces."""
+    vertical_pred = []
+    vertical_target = []
+    horizontal_pred = []
+    horizontal_target = []
+    
+    for pred, target, pos, itype in zip(predictions, targets, positions, interface_types):
+        if itype == 'vertical':
+            vertical_pred.append(pred)
+            vertical_target.append(target)
+        else:
+            horizontal_pred.append(pred)
+            horizontal_target.append(target)
     
     return {
-        'vertical': calculate_metrics(np.array(vert_pred), np.array(vert_targ)),
-        'horizontal': calculate_metrics(np.array(horz_pred), np.array(horz_targ))
+        'vertical': calculate_metrics(np.array(vertical_pred), np.array(vertical_target)),
+        'horizontal': calculate_metrics(np.array(horizontal_pred), np.array(horizontal_target))
     }
 
 def plot_error_heatmap(predictor: InterfacePredictorV2, test_data: List[Dict],
@@ -223,78 +234,102 @@ def plot_error_heatmap(predictor: InterfacePredictorV2, test_data: List[Dict],
         plt.show()
 
 def test_model():
-    """Test the trained model and generate visualizations."""
-    # Set random seeds for reproducibility
-    np.random.seed(42)
-    torch.manual_seed(42)
+    """Test the trained model on new data."""
+    # Create results directory
+    results_dir = 'test_results'
+    os.makedirs(results_dir, exist_ok=True)
     
-    # Create data generator and generate test data
     print("Generating test data...")
     data_gen = DataGeneratorV2(nx=40, ny=40, n_subdomains=(2, 2), patch_size=5)
-    test_data = data_gen.generate_dataset(n_samples=20)
+    n_test_cases = 50  # Generate 50 test problems
+    test_data = data_gen.generate_dataset(n_test_cases)
     
-    # Load trained model
     print("Loading trained model...")
+    model_info = torch.load('models/interface_predictor_v2.pth')
     predictor = InterfacePredictorV2(patch_size=5)
-    predictor.load_model('models/interface_predictor_v2.pth')
+    predictor.model.load_state_dict(model_info['model_state'])
+    scale_factors = model_info['scale_factors']
     
-    # Collect predictions and targets
-    print("\nCalculating test metrics...")
+    print("Calculating test metrics...")
     all_predictions = []
     all_targets = []
+    all_positions = []
     all_types = []
     
-    for problem in test_data:
+    # Process all test cases
+    for i, problem in enumerate(test_data):
+        problem_predictions = []
+        problem_targets = []
+        problem_positions = []
+        problem_types = []
+        
         for interface_point in problem['interface_data']:
             pred = predictor.predict(interface_point)
-            target = interface_point['target']
-            all_predictions.append(pred)
-            all_targets.append(target)
-            all_types.append(interface_point['type'])
-    
-    predictions = np.array(all_predictions)
-    targets = np.array(all_targets)
+            problem_predictions.append(pred)
+            problem_targets.append(interface_point['target'])
+            problem_positions.append(interface_point['position'])
+            problem_types.append(interface_point['type'])
+        
+        # Save individual problem results
+        if i < 10:  # Save detailed plots for first 10 problems
+            save_path = os.path.join(results_dir, f'problem_{i+1}_results.png')
+            plot_interface_predictions(
+                problem_predictions, problem_targets,
+                problem_positions, problem_types,
+                scale_factors, save_path
+            )
+        
+        # Accumulate all results
+        all_predictions.extend(problem_predictions)
+        all_targets.extend(problem_targets)
+        all_positions.extend(problem_positions)
+        all_types.extend(problem_types)
     
     # Calculate overall metrics
-    overall_metrics = calculate_metrics(predictions, targets)
-    type_metrics = analyze_by_interface_type(all_predictions, all_targets, all_types)
+    metrics = calculate_metrics(np.array(all_predictions), np.array(all_targets))
     
-    # Print metrics
+    # Save metrics to file
+    metrics_path = os.path.join(results_dir, 'test_metrics.txt')
+    with open(metrics_path, 'w') as f:
+        f.write("Overall Test Metrics:\n")
+        f.write(f"Number of test points: {len(all_predictions)}\n")
+        f.write(f"Mean Absolute Error: {metrics['mae']:.6f}\n")
+        f.write(f"Root Mean Square Error: {metrics['rmse']:.6f}\n")
+        f.write(f"Maximum Error: {metrics['max_error']:.6f}\n")
+        f.write(f"Mean Relative Error: {metrics['mean_rel_error']:.6f}\n")
+        f.write(f"Median Relative Error: {metrics['median_rel_error']:.6f}\n")
+        f.write(f"90th Percentile Relative Error: {metrics['90th_percentile_rel_error']:.6f}\n\n")
+        
+        # Add interface type metrics
+        type_metrics = analyze_by_interface_type(all_predictions, all_targets,
+                                               all_positions, all_types)
+        
+        f.write("\nVertical Interface Metrics:\n")
+        f.write(f"Number of points: {len([t for t in all_types if t == 'vertical'])}\n")
+        f.write(f"Mean Absolute Error: {type_metrics['vertical']['mae']:.6f}\n")
+        f.write(f"Root Mean Square Error: {type_metrics['vertical']['rmse']:.6f}\n")
+        
+        f.write("\nHorizontal Interface Metrics:\n")
+        f.write(f"Number of points: {len([t for t in all_types if t == 'horizontal'])}\n")
+        f.write(f"Mean Absolute Error: {type_metrics['horizontal']['mae']:.6f}\n")
+        f.write(f"Root Mean Square Error: {type_metrics['horizontal']['rmse']:.6f}\n")
+    
+    # Save overall visualization
+    plot_interface_predictions(all_predictions, all_targets, all_positions,
+                             all_types, scale_factors,
+                             os.path.join(results_dir, 'overall_results.png'))
+    
+    print(f"Testing complete. Results have been saved to '{results_dir}' directory")
+    
+    # Print summary to console
     print("\nOverall Test Metrics:")
-    print(f"Number of test points: {overall_metrics['n_samples']}")
-    print(f"Mean Absolute Error: {overall_metrics['mae']:.6f}")
-    print(f"Root Mean Square Error: {overall_metrics['rmse']:.6f}")
-    print(f"Maximum Error: {overall_metrics['max_error']:.6f}")
-    print(f"Mean Relative Error: {overall_metrics['rel_error_mean']:.6f}")
-    print(f"Median Relative Error: {overall_metrics['rel_error_median']:.6f}")
-    print(f"90th Percentile Relative Error: {overall_metrics['rel_error_90th']:.6f}")
-    
-    print("\nVertical Interface Metrics:")
-    print(f"Number of points: {type_metrics['vertical']['n_samples']}")
-    print(f"Mean Absolute Error: {type_metrics['vertical']['mae']:.6f}")
-    print(f"Root Mean Square Error: {type_metrics['vertical']['rmse']:.6f}")
-    
-    print("\nHorizontal Interface Metrics:")
-    print(f"Number of points: {type_metrics['horizontal']['n_samples']}")
-    print(f"Mean Absolute Error: {type_metrics['horizontal']['mae']:.6f}")
-    print(f"Root Mean Square Error: {type_metrics['horizontal']['rmse']:.6f}")
-    
-    # Generate visualizations
-    print("\nGenerating visualizations...")
-    
-    # Plot interface predictions
-    print("\nPlotting interface predictions...")
-    plot_interface_predictions(predictor, test_data, n_samples=3)
-    
-    # Plot error heatmaps
-    print("\nPlotting error heatmaps...")
-    plot_error_heatmap(predictor, test_data, n_samples=3)
-    
-    # Analyze error by position
-    print("\nAnalyzing error distribution by position...")
-    analyze_error_by_position(predictor, test_data)
-    
-    print("\nTesting complete!")
+    print(f"Number of test points: {len(all_predictions)}")
+    print(f"Mean Absolute Error: {metrics['mae']:.6f}")
+    print(f"Root Mean Square Error: {metrics['rmse']:.6f}")
+    print(f"Maximum Error: {metrics['max_error']:.6f}")
+    print(f"Mean Relative Error: {metrics['mean_rel_error']:.6f}")
+    print(f"Median Relative Error: {metrics['median_rel_error']:.6f}")
+    print(f"90th Percentile Relative Error: {metrics['90th_percentile_rel_error']:.6f}")
 
 if __name__ == "__main__":
     test_model() 

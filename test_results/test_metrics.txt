@@ -1,0 +1,19 @@
+Overall Test Metrics:
+Number of test points: 4000
+Mean Absolute Error: 0.009319
+Root Mean Square Error: 0.011835
+Maximum Error: 0.042078
+Mean Relative Error: 14651.436357
+Median Relative Error: 0.029211
+90th Percentile Relative Error: 0.122682
+
+
+Vertical Interface Metrics:
+Number of points: 2000
+Mean Absolute Error: 0.009378
+Root Mean Square Error: 0.011925
+
+Horizontal Interface Metrics:
+Number of points: 2000
+Mean Absolute Error: 0.009260
+Root Mean Square Error: 0.011745

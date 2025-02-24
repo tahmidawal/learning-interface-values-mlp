@@ -1,30 +1,115 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import torch
 from data_generator_v2 import DataGeneratorV2
 from ml_model_v2 import InterfacePredictorV2
 from pde_solver import PoissonSolver
-import torch
-from typing import Dict, List, Tuple, Callable, Optional
-import seaborn as sns
+import os
 
-def extract_subdomain_bcs(solution: np.ndarray, x_start: int, x_end: int,
-                         y_start: int, y_end: int) -> Dict[str, Callable]:
-    """Extract boundary conditions for a subdomain from a solution."""
+def unscale_value(value: float, scale_min: float, scale_max: float,
+                  target_min: float, target_max: float) -> float:
+    """Unscale a value from the scaled range back to the original range."""
+    return (value - scale_min) * (target_max - target_min) / (scale_max - scale_min) + target_min
+
+def unscale_array(arr: np.ndarray, scale_min: float, scale_max: float,
+                 target_min: float, target_max: float) -> np.ndarray:
+    """Unscale an array from the scaled range back to the original range."""
+    return (arr - scale_min) * (target_max - target_min) / (scale_max - scale_min) + target_min
+
+def plot_comparison(solutions: dict, interface_predictions: dict = None, title: str = "Solution Comparison"):
+    """
+    Plot multiple solutions side by side with their differences.
+    
+    Args:
+        solutions: Dictionary of solution arrays
+        interface_predictions: Dictionary containing vertical and horizontal predictions
+        title: Plot title
+    """
+    n_solutions = len(solutions)
+    fig = plt.figure(figsize=(5*n_solutions, 10))
+    
+    # Plot solutions
+    for i, (name, sol) in enumerate(solutions.items()):
+        ax = plt.subplot(2, n_solutions, i+1)
+        
+        # Create a copy of the solution to modify with interface values
+        plot_sol = sol.copy()
+        
+        # Add interface lines and values only for ML Interface solution
+        if interface_predictions is not None and name == 'ML Interface':
+            # Plot vertical interfaces
+            if 'vertical' in interface_predictions:
+                for x in interface_predictions['vertical'].keys():
+                    # Add vertical interface line
+                    ax.axvline(x=x, color='red', linestyle='--', linewidth=2, alpha=0.8)
+                    # Set interface values
+                    for y in range(40):
+                        plot_sol[y, x] = interface_predictions['vertical'][x][y]
+            
+            # Plot horizontal interfaces
+            if 'horizontal' in interface_predictions:
+                for y in interface_predictions['horizontal'].keys():
+                    # Add horizontal interface line
+                    ax.axhline(y=y, color='red', linestyle='--', linewidth=2, alpha=0.8)
+                    # Set interface values
+                    for x in range(40):
+                        plot_sol[y, x] = interface_predictions['horizontal'][y][x]
+        
+        im = ax.imshow(plot_sol, cmap='viridis', aspect='equal')
+        ax.set_title(name)
+        plt.colorbar(im, ax=ax)
+    
+    # Plot differences with analytical
+    analytical = solutions['Analytical']
+    for i, (name, sol) in enumerate(solutions.items()):
+        if name != 'Analytical':
+            ax = plt.subplot(2, n_solutions, n_solutions + i + 1)
+            diff = np.abs(sol - analytical)
+            im = ax.imshow(diff, cmap='viridis', aspect='equal')
+            ax.set_title(f'Error: {name} vs Analytical')
+            plt.colorbar(im, ax=ax)
+            
+            # Add interface lines to difference plots only for ML Interface solution
+            if interface_predictions is not None and name == 'ML Interface':
+                # Plot vertical interfaces
+                if 'vertical' in interface_predictions:
+                    for x in interface_predictions['vertical'].keys():
+                        ax.axvline(x=x, color='red', linestyle='--', linewidth=2, alpha=0.8)
+                
+                # Plot horizontal interfaces
+                if 'horizontal' in interface_predictions:
+                    for y in interface_predictions['horizontal'].keys():
+                        ax.axhline(y=y, color='red', linestyle='--', linewidth=2, alpha=0.8)
+    
+    plt.suptitle(title)
+    plt.tight_layout()
+    return fig
+
+def create_bc_functions(values: np.ndarray, nx: int, ny: int):
+    """Create boundary condition functions from values array."""
     def bc_left(y):
-        y_idx = int(y * (y_end - y_start)) + y_start
-        return float(solution[y_idx, x_start])
+        if isinstance(y, np.ndarray):
+            indices = np.clip((y * (ny - 1)).astype(int), 0, ny - 1)
+            return values[indices, 0]
+        return float(values[min(int(y * (ny - 1)), ny - 1), 0])
     
     def bc_right(y):
-        y_idx = int(y * (y_end - y_start)) + y_start
-        return float(solution[y_idx, x_end-1])
+        if isinstance(y, np.ndarray):
+            indices = np.clip((y * (ny - 1)).astype(int), 0, ny - 1)
+            return values[indices, -1]
+        return float(values[min(int(y * (ny - 1)), ny - 1), -1])
     
     def bc_bottom(x):
-        x_idx = int(x * (x_end - x_start)) + x_start
-        return float(solution[y_start, x_idx])
+        if isinstance(x, np.ndarray):
+            indices = np.clip((x * (nx - 1)).astype(int), 0, nx - 1)
+            return values[0, indices]
+        return float(values[0, min(int(x * (nx - 1)), nx - 1)])
     
     def bc_top(x):
-        x_idx = int(x * (x_end - x_start)) + x_start
-        return float(solution[y_end-1, x_idx])
+        if isinstance(x, np.ndarray):
+            indices = np.clip((x * (nx - 1)).astype(int), 0, nx - 1)
+            return values[-1, indices]
+        return float(values[-1, min(int(x * (nx - 1)), nx - 1)])
     
     return {
         'left': bc_left,
@@ -33,355 +118,364 @@ def extract_subdomain_bcs(solution: np.ndarray, x_start: int, x_end: int,
         'top': bc_top
     }
 
-def solve_with_ml_interfaces(predictor: InterfacePredictorV2, theta: np.ndarray,
-                           f: np.ndarray, global_bc_dict: Dict[str, Callable],
-                           nx: int = 40, ny: int = 40) -> np.ndarray:
-    """
-    Solve the PDE using ML-predicted interface conditions.
+def create_bc_functions_unscaled(values: np.ndarray, nx: int, ny: int, scale_factors: dict):
+    """Create boundary condition functions that unscale values for the PDE solver."""
+    def bc_left(y):
+        if isinstance(y, np.ndarray):
+            indices = np.clip((y * (ny - 1)).astype(int), 0, ny - 1)
+            scaled_vals = values[indices, 0]
+            return unscale_array(scaled_vals, -1, 1, scale_factors['solution']['min'], scale_factors['solution']['max'])
+        scaled_val = float(values[min(int(y * (ny - 1)), ny - 1), 0])
+        return unscale_value(scaled_val, -1, 1, scale_factors['solution']['min'], scale_factors['solution']['max'])
     
-    Args:
-        predictor: Trained ML model for interface prediction
-        theta: Diffusion coefficient field
-        f: Source term
-        global_bc_dict: Global boundary conditions
-        nx, ny: Grid dimensions
+    def bc_right(y):
+        if isinstance(y, np.ndarray):
+            indices = np.clip((y * (ny - 1)).astype(int), 0, ny - 1)
+            scaled_vals = values[indices, -1]
+            return unscale_array(scaled_vals, -1, 1, scale_factors['solution']['min'], scale_factors['solution']['max'])
+        scaled_val = float(values[min(int(y * (ny - 1)), ny - 1), -1])
+        return unscale_value(scaled_val, -1, 1, scale_factors['solution']['min'], scale_factors['solution']['max'])
     
-    Returns:
-        np.ndarray: Combined solution
-    """
-    # Initialize solution array and solvers
-    solution = np.zeros((ny, nx))
-    subdomain_nx = nx // 2
-    subdomain_ny = ny // 2
-    solvers = [[PoissonSolver(subdomain_nx, subdomain_ny) for _ in range(2)] for _ in range(2)]
+    def bc_bottom(x):
+        if isinstance(x, np.ndarray):
+            indices = np.clip((x * (nx - 1)).astype(int), 0, nx - 1)
+            scaled_vals = values[0, indices]
+            return unscale_array(scaled_vals, -1, 1, scale_factors['solution']['min'], scale_factors['solution']['max'])
+        scaled_val = float(values[0, min(int(x * (nx - 1)), nx - 1)])
+        return unscale_value(scaled_val, -1, 1, scale_factors['solution']['min'], scale_factors['solution']['max'])
     
-    # Get ML predictions for interface values
-    interface_values = np.zeros((ny, nx))
-    mask = np.zeros((ny, nx), dtype=bool)
+    def bc_top(x):
+        if isinstance(x, np.ndarray):
+            indices = np.clip((x * (nx - 1)).astype(int), 0, nx - 1)
+            scaled_vals = values[-1, indices]
+            return unscale_array(scaled_vals, -1, 1, scale_factors['solution']['min'], scale_factors['solution']['max'])
+        scaled_val = float(values[-1, min(int(x * (nx - 1)), nx - 1)])
+        return unscale_value(scaled_val, -1, 1, scale_factors['solution']['min'], scale_factors['solution']['max'])
     
-    # Helper function to extract padded patch
-    def extract_patch(field, center_x, center_y, patch_size=5):
-        half_size = patch_size // 2
-        padded_field = np.pad(field, ((half_size, half_size), (half_size, half_size)), mode='edge')
-        center_y_pad = center_y + half_size
-        center_x_pad = center_x + half_size
-        return padded_field[center_y_pad-half_size:center_y_pad+half_size+1,
-                          center_x_pad-half_size:center_x_pad+half_size+1]
-    
-    # Get global boundary values for normalization
-    global_bc_values = []
-    y_coords = np.linspace(0, 1, ny)
-    x_coords = np.linspace(0, 1, nx)
-    for y in y_coords:
-        global_bc_values.append(global_bc_dict['left'](y))
-        global_bc_values.append(global_bc_dict['right'](y))
-    for x in x_coords:
-        global_bc_values.append(global_bc_dict['bottom'](x))
-        global_bc_values.append(global_bc_dict['top'](x))
-    global_bc_values = np.array(global_bc_values)
-    bc_mean = np.mean(global_bc_values)
-    bc_std = np.std(global_bc_values) + 1e-8
-    
-    # Vertical interface (x = nx//2)
-    for y in range(ny):
-        interface_point = {
-            'type': 'vertical',
-            'position': (nx//2, y),
-            'theta_patch': extract_patch(theta, nx//2, y),
-            'f_patch': extract_patch(f, nx//2, y),
-            'boundary_values': (np.array([
-                global_bc_dict['left'](y/ny),
-                global_bc_dict['right'](y/ny),
-                global_bc_dict['bottom'](0.5),
-                global_bc_dict['top'](0.5)
-            ]) - bc_mean) / bc_std
-        }
-        pred = predictor.predict(interface_point)
-        interface_values[y, nx//2] = pred * bc_std + bc_mean
-        mask[y, nx//2] = True
-    
-    # Horizontal interface (y = ny//2)
-    for x in range(nx):
-        interface_point = {
-            'type': 'horizontal',
-            'position': (x, ny//2),
-            'theta_patch': extract_patch(theta, x, ny//2),
-            'f_patch': extract_patch(f, x, ny//2),
-            'boundary_values': (np.array([
-                global_bc_dict['left'](0.5),
-                global_bc_dict['right'](0.5),
-                global_bc_dict['bottom'](x/nx),
-                global_bc_dict['top'](x/nx)
-            ]) - bc_mean) / bc_std
-        }
-        pred = predictor.predict(interface_point)
-        interface_values[ny//2, x] = pred * bc_std + bc_mean
-        mask[ny//2, x] = True
-    
-    # Solve each subdomain
-    for i in range(2):
-        for j in range(2):
-            y_start = i * subdomain_ny
-            y_end = (i + 1) * subdomain_ny
-            x_start = j * subdomain_nx
-            x_end = (j + 1) * subdomain_nx
-            
-            # Extract subdomain data
-            theta_sub = theta[y_start:y_end, x_start:x_end]
-            f_sub = f[y_start:y_end, x_start:x_end]
-            
-            # Create boundary conditions for subdomain
-            bc_dict = {}
-            
-            # Left boundary
-            if j == 0:
-                bc_dict['left'] = global_bc_dict['left']
-            else:
-                def bc_left(y):
-                    y_idx = min(int(y * subdomain_ny) + y_start, ny - 1)
-                    return float(interface_values[y_idx, x_start])
-                bc_dict['left'] = bc_left
-            
-            # Right boundary
-            if j == 1:
-                bc_dict['right'] = global_bc_dict['right']
-            else:
-                def bc_right(y):
-                    y_idx = min(int(y * subdomain_ny) + y_start, ny - 1)
-                    return float(interface_values[y_idx, x_end])
-                bc_dict['right'] = bc_right
-            
-            # Bottom boundary
-            if i == 0:
-                bc_dict['bottom'] = global_bc_dict['bottom']
-            else:
-                def bc_bottom(x):
-                    x_idx = min(int(x * subdomain_nx) + x_start, nx - 1)
-                    return float(interface_values[y_start, x_idx])
-                bc_dict['bottom'] = bc_bottom
-            
-            # Top boundary
-            if i == 1:
-                bc_dict['top'] = global_bc_dict['top']
-            else:
-                def bc_top(x):
-                    x_idx = min(int(x * subdomain_nx) + x_start, nx - 1)
-                    return float(interface_values[y_end, x_idx])
-                bc_dict['top'] = bc_top
-            
-            # Solve subdomain
-            sol_sub, _ = solvers[i][j].solve_subdomain(theta_sub, f_sub, bc_dict)
-            
-            # Store solution
-            solution[y_start:y_end, x_start:x_end] = sol_sub
-    
-    return solution, interface_values, mask
-
-def plot_solution_comparison(analytical: np.ndarray, numerical: np.ndarray,
-                           ml_subdomain: np.ndarray, interface_values: np.ndarray,
-                           interface_mask: np.ndarray, save_path: Optional[str] = None):
-    """Plot and compare different solutions with subdomain boundaries and interface values."""
-    fig = plt.figure(figsize=(20, 15))
-    
-    # Plot analytical solution
-    ax1 = plt.subplot(231)
-    im1 = ax1.imshow(analytical, cmap='viridis')
-    plt.colorbar(im1, ax=ax1)
-    ax1.set_title('Analytical Solution')
-    
-    # Plot numerical solution
-    ax2 = plt.subplot(232)
-    im2 = ax2.imshow(numerical, cmap='viridis')
-    plt.colorbar(im2, ax=ax2)
-    ax2.set_title('Full Numerical Solution')
-    
-    # Plot ML-based subdomain solution with boundaries
-    ax3 = plt.subplot(233)
-    im3 = ax3.imshow(ml_subdomain, cmap='viridis')
-    plt.colorbar(im3, ax=ax3)
-    
-    # Add subdomain boundaries
-    nx, ny = ml_subdomain.shape
-    ax3.axvline(x=nx//2, color='r', linestyle='--', alpha=0.5)
-    ax3.axhline(y=ny//2, color='r', linestyle='--', alpha=0.5)
-    
-    # Plot interface values
-    interface_x = np.where(interface_mask)[1]
-    interface_y = np.where(interface_mask)[0]
-    ax3.scatter(interface_x, interface_y, c='red', marker='x', s=50, label='Interface Points')
-    ax3.legend()
-    ax3.set_title('ML-Based Subdomain Solution\nwith Interface Points')
-    
-    # Plot difference between analytical and ML solution
-    ax4 = plt.subplot(234)
-    diff1 = np.abs(analytical - ml_subdomain)
-    im4 = ax4.imshow(diff1, cmap='viridis')
-    plt.colorbar(im4, ax=ax4)
-    ax4.axvline(x=nx//2, color='r', linestyle='--', alpha=0.5)
-    ax4.axhline(y=ny//2, color='r', linestyle='--', alpha=0.5)
-    ax4.set_title('|Analytical - ML Solution|')
-    
-    # Plot difference between numerical and ML solution
-    ax5 = plt.subplot(235)
-    diff2 = np.abs(numerical - ml_subdomain)
-    im5 = ax5.imshow(diff2, cmap='viridis')
-    plt.colorbar(im5, ax=ax5)
-    ax5.axvline(x=nx//2, color='r', linestyle='--', alpha=0.5)
-    ax5.axhline(y=ny//2, color='r', linestyle='--', alpha=0.5)
-    ax5.set_title('|Numerical - ML Solution|')
-    
-    # Plot subdomains separately
-    ax6 = plt.subplot(236)
-    subdomain_view = np.ma.masked_array(ml_subdomain.copy(), np.zeros_like(ml_subdomain, dtype=bool))
-    
-    # Add grid lines for subdomains
-    ax6.axvline(x=nx//2, color='r', linestyle='--', alpha=0.5)
-    ax6.axhline(y=ny//2, color='r', linestyle='--', alpha=0.5)
-    
-    # Plot interface values
-    masked_interfaces = np.ma.masked_array(interface_values, ~interface_mask)
-    im6 = ax6.imshow(subdomain_view, cmap='viridis')
-    im6_interface = ax6.imshow(masked_interfaces, cmap='Reds', alpha=0.7)
-    plt.colorbar(im6, ax=ax6, label='Subdomain Solution')
-    plt.colorbar(im6_interface, ax=ax6, label='Interface Values')
-    ax6.set_title('Subdomains with Interface Values')
-    
-    # Add text labels for subdomains
-    ax6.text(nx//4, ny//4, 'Subdomain 1', ha='center', va='center', color='white')
-    ax6.text(3*nx//4, ny//4, 'Subdomain 2', ha='center', va='center', color='white')
-    ax6.text(nx//4, 3*ny//4, 'Subdomain 3', ha='center', va='center', color='white')
-    ax6.text(3*nx//4, 3*ny//4, 'Subdomain 4', ha='center', va='center', color='white')
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    # Calculate error metrics
-    metrics = {
-        'ml_vs_analytical': {
-            'mae': np.mean(diff1),
-            'rmse': np.sqrt(np.mean(diff1**2)),
-            'max_error': np.max(diff1)
-        },
-        'ml_vs_numerical': {
-            'mae': np.mean(diff2),
-            'rmse': np.sqrt(np.mean(diff2**2)),
-            'max_error': np.max(diff2)
-        },
-        'numerical_vs_analytical': {
-            'mae': np.mean(np.abs(numerical - analytical)),
-            'rmse': np.sqrt(np.mean((numerical - analytical)**2)),
-            'max_error': np.max(np.abs(numerical - analytical))
-        }
+    return {
+        'left': bc_left,
+        'right': bc_right,
+        'bottom': bc_bottom,
+        'top': bc_top
     }
-    
-    return metrics
 
-def run_multiple_comparisons(n_samples: int = 15):
-    """Run multiple comparisons and collect statistics."""
-    # Set random seeds
-    np.random.seed(42)
-    torch.manual_seed(42)
+def compare_solutions():
+    """Compare ML-predicted interface solution with analytical and full domain solutions."""
+    # Create results directory
+    results_dir = 'comparison_results'
+    os.makedirs(results_dir, exist_ok=True)
     
-    # Create output directory if it doesn't exist
-    import os
-    os.makedirs('comparison_results', exist_ok=True)
-    
-    # Create data generator
+    # Initialize data generator and solvers
+    print("Initializing...")
     data_gen = DataGeneratorV2(nx=40, ny=40, n_subdomains=(2, 2), patch_size=5)
+    full_solver = PoissonSolver(nx=40, ny=40)
+    subdomain_solver = PoissonSolver(nx=20, ny=20)  # For 20x20 subdomains
     
     # Load trained model
-    print("Loading trained model...")
+    print("Loading ML model...")
+    model_info = torch.load('models/interface_predictor_v2.pth')
     predictor = InterfacePredictorV2(patch_size=5)
-    predictor.load_model('models/interface_predictor_v2.pth')
+    predictor.model.load_state_dict(model_info['model_state'])
+    scale_factors = model_info['scale_factors']
     
-    # Initialize lists to store metrics
-    all_metrics = []
+    # Generate a test problem
+    print("Generating test problem...")
+    theta_scaled, f_scaled, u_analytical_scaled = data_gen.generate_random_problem()
     
-    print(f"\nRunning {n_samples} comparisons...")
-    for i in range(n_samples):
-        print(f"\nComparison {i+1}/{n_samples}")
+    # Unscale the values for PDE solving
+    theta = unscale_array(theta_scaled, -1, 1, 
+                         scale_factors['theta']['min'], 
+                         scale_factors['theta']['max'])
+    f = unscale_array(f_scaled, -1, 1,
+                      scale_factors['f']['min'],
+                      scale_factors['f']['max'])
+    
+    # Create boundary condition functions for unscaled PDE solving
+    bc_dict = create_bc_functions_unscaled(u_analytical_scaled, 40, 40, scale_factors)
+    
+    # Solve full domain with unscaled boundary conditions
+    print("Solving full domain...")
+    u_full, _ = full_solver.solve_full_domain(
+        theta, f,
+        bc_dict['left'], bc_dict['right'],
+        bc_dict['bottom'], bc_dict['top']
+    )
+    
+    # Get ML predictions for interfaces (keep them scaled between -1 and 1)
+    print("Getting ML predictions for interfaces...")
+    interface_data = data_gen.extract_interface_data(theta_scaled, f_scaled, u_analytical_scaled, bc_dict)
+    
+    # Store both scaled and unscaled predictions
+    vertical_predictions = {}  # (y_idx) -> scaled_value
+    horizontal_predictions = {}  # (x_idx) -> scaled_value
+    vertical_predictions_unscaled = {}  # (y_idx) -> unscaled_value
+    horizontal_predictions_unscaled = {}  # (x_idx) -> unscaled_value
+    
+    for point in interface_data:
+        x, y = point['position']
+        pred_scaled = predictor.predict(point)
+        pred_unscaled = unscale_value(pred_scaled, -1, 1, 
+                                     scale_factors['solution']['min'],
+                                     scale_factors['solution']['max'])
         
-        # Generate a test problem
-        print("Generating test problem...")
-        theta, f, analytical_solution = data_gen.generate_random_problem()
-        bc_dict = data_gen.generate_boundary_conditions(analytical_solution)
+        if point['type'] == 'vertical':
+            vertical_predictions[y] = pred_scaled
+            vertical_predictions_unscaled[y] = pred_unscaled
+        else:
+            horizontal_predictions[x] = pred_scaled
+            horizontal_predictions_unscaled[x] = pred_unscaled
+    
+    # Solve subdomains using unscaled predicted interface values
+    print("Solving subdomains...")
+    u_ml_interface = np.zeros_like(u_full)
+    
+    # Helper function to create interface BC function with array indices
+    def create_interface_bc(predictions, subdomain_range, interface_type='vertical'):
+        y_start, y_end, x_start, x_end = subdomain_range
+        def bc_func(x):
+            if isinstance(x, np.ndarray):
+                # For array input, x is already array indices
+                if interface_type == 'horizontal':
+                    global_indices = x + x_start
+                else:  # vertical
+                    global_indices = x + y_start
+                return np.array([predictions.get(int(i), 0) for i in global_indices])
+            else:
+                # For single input, x is array index
+                if interface_type == 'horizontal':
+                    global_idx = int(x) + x_start
+                else:  # vertical
+                    global_idx = int(x) + y_start
+                return float(predictions.get(global_idx, 0))
+        return bc_func
+    
+    # Solve bottom-left subdomain
+    print("Solving bottom-left subdomain...")
+    bc_right = create_interface_bc(
+        {y: vertical_predictions_unscaled[y] for y in range(40)},
+        (0, 20, 0, 20),
+        'vertical'
+    )
+    bc_top = create_interface_bc(
+        {x: horizontal_predictions_unscaled[x] for x in range(40)},
+        (0, 20, 0, 20),
+        'horizontal'
+    )
+    u_bl, _ = subdomain_solver.solve_subdomain(
+        theta[:20, :20], f[:20, :20],
+        {
+            'left': lambda y: bc_dict['left'](y/20),
+            'right': bc_right,
+            'bottom': lambda x: bc_dict['bottom'](x/20),
+            'top': bc_top
+        }
+    )
+    u_ml_interface[:20, :20] = u_bl
+    
+    # Solve bottom-right subdomain
+    print("Solving bottom-right subdomain...")
+    bc_left = create_interface_bc(
+        {y: vertical_predictions_unscaled[y] for y in range(40)},
+        (0, 20, 20, 40),
+        'vertical'
+    )
+    bc_top = create_interface_bc(
+        {x: horizontal_predictions_unscaled[x] for x in range(40)},
+        (0, 20, 20, 40),
+        'horizontal'
+    )
+    u_br, _ = subdomain_solver.solve_subdomain(
+        theta[:20, 20:], f[:20, 20:],
+        {
+            'left': bc_left,
+            'right': lambda y: bc_dict['right'](y/20),
+            'bottom': lambda x: bc_dict['bottom']((x+20)/40),
+            'top': bc_top
+        }
+    )
+    u_ml_interface[:20, 20:] = u_br
+    
+    # Solve top-left subdomain
+    print("Solving top-left subdomain...")
+    bc_right = create_interface_bc(
+        {y: vertical_predictions_unscaled[y] for y in range(40)},
+        (20, 40, 0, 20),
+        'vertical'
+    )
+    bc_bottom = create_interface_bc(
+        {x: horizontal_predictions_unscaled[x] for x in range(40)},
+        (20, 40, 0, 20),
+        'horizontal'
+    )
+    u_tl, _ = subdomain_solver.solve_subdomain(
+        theta[20:, :20], f[20:, :20],
+        {
+            'left': lambda y: bc_dict['left']((y+20)/40),
+            'right': bc_right,
+            'bottom': bc_bottom,
+            'top': lambda x: bc_dict['top'](x/20)
+        }
+    )
+    u_ml_interface[20:, :20] = u_tl
+    
+    # Solve top-right subdomain
+    print("Solving top-right subdomain...")
+    bc_left = create_interface_bc(
+        {y: vertical_predictions_unscaled[y] for y in range(40)},
+        (20, 40, 20, 40),
+        'vertical'
+    )
+    bc_bottom = create_interface_bc(
+        {x: horizontal_predictions_unscaled[x] for x in range(40)},
+        (20, 40, 20, 40),
+        'horizontal'
+    )
+    u_tr, _ = subdomain_solver.solve_subdomain(
+        theta[20:, 20:], f[20:, 20:],
+        {
+            'left': bc_left,
+            'right': lambda y: bc_dict['right']((y+20)/40),
+            'bottom': bc_bottom,
+            'top': lambda x: bc_dict['top']((x+20)/40)
+        }
+    )
+    u_ml_interface[20:, 20:] = u_tr
+    
+    # Scale solutions for comparison
+    # First scale the full domain solution
+    u_full_scaled = np.zeros_like(u_full)
+    for i in range(u_full.shape[0]):
+        for j in range(u_full.shape[1]):
+            u_full_scaled[i,j] = unscale_value(u_full[i,j], 
+                                             scale_factors['solution']['min'],
+                                             scale_factors['solution']['max'],
+                                             -1, 1)
+    
+    # Scale the ML interface solution
+    u_ml_interface_scaled = np.zeros_like(u_ml_interface)
+    for i in range(u_ml_interface.shape[0]):
+        for j in range(u_ml_interface.shape[1]):
+            u_ml_interface_scaled[i,j] = unscale_value(u_ml_interface[i,j],
+                                                      scale_factors['solution']['min'],
+                                                      scale_factors['solution']['max'],
+                                                      -1, 1)
+    
+    # Verify interface values match predictions
+    print("\nVerifying interface values...")
+    vertical_interface_error = np.mean(np.abs(u_ml_interface_scaled[:, 20] - 
+                                            [vertical_predictions[y] for y in range(40)]))
+    horizontal_interface_error = np.mean(np.abs(u_ml_interface_scaled[20, :] - 
+                                              [horizontal_predictions[x] for x in range(40)]))
+    print(f"Mean vertical interface error: {vertical_interface_error:.6f}")
+    print(f"Mean horizontal interface error: {horizontal_interface_error:.6f}")
+    
+    # Calculate errors
+    print("\nCalculating errors...")
+    
+    def calculate_errors(solution, reference):
+        diff = np.abs(solution - reference)
+        return {
+            'mae': np.mean(diff),
+            'rmse': np.sqrt(np.mean(diff**2)),
+            'max_error': np.max(diff),
+            'rel_error': np.mean(diff / (np.abs(reference) + 1e-8))
+        }
+    
+    full_errors = calculate_errors(u_full_scaled, u_analytical_scaled)
+    ml_errors = calculate_errors(u_ml_interface_scaled, u_analytical_scaled)
+    
+    # Save results
+    print("\nSaving results...")
+    solutions = {
+        'Analytical': u_analytical_scaled,
+        'Full Domain': u_full_scaled,
+        'ML Interface': u_ml_interface_scaled
+    }
+    
+    # Store the scaled predictions for plotting
+    interface_lines = {
+        'vertical': {20: {y: vertical_predictions[y] for y in range(40)}},  # x=20 is the vertical interface
+        'horizontal': {20: {x: horizontal_predictions[x] for x in range(40)}}  # y=20 is the horizontal interface
+    }
+    
+    # Plot solution comparison with interface lines
+    fig = plot_comparison(solutions, interface_lines)
+    fig.savefig(os.path.join(results_dir, 'solution_comparison.png'))
+    plt.close(fig)
+    
+    # Plot interface values
+    plot_interface_values(solutions, interface_lines, results_dir)
+    
+    # Save error metrics
+    with open(os.path.join(results_dir, 'error_metrics.txt'), 'w') as f:
+        f.write("Full Domain Solution Errors:\n")
+        f.write(f"Mean Absolute Error: {full_errors['mae']:.6f}\n")
+        f.write(f"Root Mean Square Error: {full_errors['rmse']:.6f}\n")
+        f.write(f"Maximum Error: {full_errors['max_error']:.6f}\n")
+        f.write(f"Relative Error: {full_errors['rel_error']:.6f}\n\n")
         
-        # Solve full domain numerically
-        print("Solving full domain numerically...")
-        full_solver = PoissonSolver(40, 40)
-        numerical_solution, _ = full_solver.solve_full_domain(
-            theta, f,
-            bc_dict['left'], bc_dict['right'],
-            bc_dict['bottom'], bc_dict['top']
-        )
-        
-        # Solve using ML-predicted interface conditions
-        print("Solving with ML-predicted interface conditions...")
-        ml_solution, interface_values, interface_mask = solve_with_ml_interfaces(
-            predictor, theta, f, bc_dict
-        )
-        
-        # Generate and save comparison plot
-        print("Generating comparison plot...")
-        metrics = plot_solution_comparison(
-            analytical_solution,
-            numerical_solution,
-            ml_solution,
-            interface_values,
-            interface_mask,
-            save_path=f'comparison_results/comparison_{i+1}.png'
-        )
-        
-        all_metrics.append(metrics)
+        f.write("ML Interface Solution Errors:\n")
+        f.write(f"Mean Absolute Error: {ml_errors['mae']:.6f}\n")
+        f.write(f"Root Mean Square Error: {ml_errors['rmse']:.6f}\n")
+        f.write(f"Maximum Error: {ml_errors['max_error']:.6f}\n")
+        f.write(f"Relative Error: {ml_errors['rel_error']:.6f}\n")
     
-    # Calculate and plot statistical summary
-    print("\nCalculating statistical summary...")
+    # Print summary
+    print("\nResults Summary:")
+    print("\nFull Domain Solution Errors:")
+    print(f"Mean Absolute Error: {full_errors['mae']:.6f}")
+    print(f"Root Mean Square Error: {full_errors['rmse']:.6f}")
+    print(f"Maximum Error: {full_errors['max_error']:.6f}")
+    print(f"Relative Error: {full_errors['rel_error']:.6f}")
     
-    # Extract metrics
-    ml_analytical_mae = [m['ml_vs_analytical']['mae'] for m in all_metrics]
-    ml_analytical_rmse = [m['ml_vs_analytical']['rmse'] for m in all_metrics]
-    ml_numerical_mae = [m['ml_vs_numerical']['mae'] for m in all_metrics]
-    ml_numerical_rmse = [m['ml_vs_numerical']['rmse'] for m in all_metrics]
-    numerical_analytical_mae = [m['numerical_vs_analytical']['mae'] for m in all_metrics]
-    numerical_analytical_rmse = [m['numerical_vs_analytical']['rmse'] for m in all_metrics]
+    print("\nML Interface Solution Errors:")
+    print(f"Mean Absolute Error: {ml_errors['mae']:.6f}")
+    print(f"Root Mean Square Error: {ml_errors['rmse']:.6f}")
+    print(f"Maximum Error: {ml_errors['max_error']:.6f}")
+    print(f"Relative Error: {ml_errors['rel_error']:.6f}")
     
-    # Create error comparison plots
-    plt.figure(figsize=(15, 10))
+    print(f"\nResults have been saved to '{results_dir}' directory")
+
+def plot_interface_values(solutions: dict, interface_predictions: dict, results_dir: str):
+    """Plot the interface values along the vertical and horizontal lines."""
+    # Create figure for interface value plots
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
     
-    # MAE comparison
-    plt.subplot(211)
-    plt.boxplot([ml_analytical_mae, ml_numerical_mae, numerical_analytical_mae],
-                labels=['ML vs Analytical', 'ML vs Numerical', 'Numerical vs Analytical'])
-    plt.title('Mean Absolute Error Comparison')
-    plt.ylabel('Error')
-    plt.grid(True)
+    # Plot vertical interface values
+    y_coords = np.arange(40)
+    vertical_x = 20  # x-coordinate of vertical interface
     
-    # RMSE comparison
-    plt.subplot(212)
-    plt.boxplot([ml_analytical_rmse, ml_numerical_rmse, numerical_analytical_rmse],
-                labels=['ML vs Analytical', 'ML vs Numerical', 'Numerical vs Analytical'])
-    plt.title('Root Mean Square Error Comparison')
-    plt.ylabel('Error')
-    plt.grid(True)
+    # Get the predicted values for vertical interface
+    vertical_pred_values = np.array([interface_predictions['vertical'][20].get(y, 0) for y in y_coords])
+    
+    ax1.plot(y_coords, solutions['Analytical'][:, vertical_x], 'b-', label='Analytical')
+    ax1.plot(y_coords, vertical_pred_values, 'r--', label='ML Predicted')
+    ax1.plot(y_coords, solutions['ML Interface'][:, vertical_x], 'g:', label='ML Solution')
+    ax1.set_xlabel('Y coordinate')
+    ax1.set_ylabel('Solution value')
+    ax1.set_title('Values along Vertical Interface (x=20)')
+    ax1.grid(True)
+    ax1.legend()
+    
+    # Plot horizontal interface values
+    x_coords = np.arange(40)
+    horizontal_y = 20  # y-coordinate of horizontal interface
+    
+    # Get the predicted values for horizontal interface
+    horizontal_pred_values = np.array([interface_predictions['horizontal'][20].get(x, 0) for x in x_coords])
+    
+    ax2.plot(x_coords, solutions['Analytical'][horizontal_y, :], 'b-', label='Analytical')
+    ax2.plot(x_coords, horizontal_pred_values, 'r--', label='ML Predicted')
+    ax2.plot(x_coords, solutions['ML Interface'][horizontal_y, :], 'g:', label='ML Solution')
+    ax2.set_xlabel('X coordinate')
+    ax2.set_ylabel('Solution value')
+    ax2.set_title('Values along Horizontal Interface (y=20)')
+    ax2.grid(True)
+    ax2.legend()
     
     plt.tight_layout()
-    plt.savefig('comparison_results/error_statistics.png', dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    # Print statistical summary
-    print("\nStatistical Summary:")
-    print("\nMean Absolute Error:")
-    print(f"ML vs Analytical: {np.mean(ml_analytical_mae):.6f} ± {np.std(ml_analytical_mae):.6f}")
-    print(f"ML vs Numerical: {np.mean(ml_numerical_mae):.6f} ± {np.std(ml_numerical_mae):.6f}")
-    print(f"Numerical vs Analytical: {np.mean(numerical_analytical_mae):.6f} ± {np.std(numerical_analytical_mae):.6f}")
-    
-    print("\nRoot Mean Square Error:")
-    print(f"ML vs Analytical: {np.mean(ml_analytical_rmse):.6f} ± {np.std(ml_analytical_rmse):.6f}")
-    print(f"ML vs Numerical: {np.mean(ml_numerical_rmse):.6f} ± {np.std(ml_numerical_rmse):.6f}")
-    print(f"Numerical vs Analytical: {np.mean(numerical_analytical_rmse):.6f} ± {np.std(numerical_analytical_rmse):.6f}")
+    fig.savefig(os.path.join(results_dir, 'interface_values.png'))
+    plt.close(fig)
 
 if __name__ == "__main__":
-    run_multiple_comparisons(n_samples=15) 
+    compare_solutions() 

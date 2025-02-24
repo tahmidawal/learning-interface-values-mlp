@@ -1,0 +1,11 @@
+Full Domain Solution Errors:
+Mean Absolute Error: 0.597953
+Root Mean Square Error: 0.833030
+Maximum Error: 1.500026
+Relative Error: 125511.405584
+
+ML Interface Solution Errors:
+Mean Absolute Error: 0.589824
+Root Mean Square Error: 0.830293
+Maximum Error: 1.885854
+Relative Error: 2701058.370601

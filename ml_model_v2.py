@@ -61,6 +61,7 @@ class InterfaceNetV2(nn.Module):
     """
     Enhanced neural network for predicting interface values.
     Uses a CNN to process local context and combines with global boundary information.
+    All input and output values are expected to be scaled between -1 and 1.
     """
     
     def __init__(self, patch_size: int = 3, n_boundary_values: int = 4):
@@ -76,16 +77,20 @@ class InterfaceNetV2(nn.Module):
         # CNN for processing theta patches
         self.theta_conv = nn.Sequential(
             nn.Conv2d(1, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),  # Added batch normalization
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),  # Added batch normalization
             nn.ReLU()
         )
         
         # CNN for processing f patches
         self.f_conv = nn.Sequential(
             nn.Conv2d(1, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),  # Added batch normalization
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),  # Added batch normalization
             nn.ReLU()
         )
         
@@ -95,26 +100,34 @@ class InterfaceNetV2(nn.Module):
         # Fully connected layers
         self.fc = nn.Sequential(
             nn.Linear(2 * self.flat_size + n_boundary_values, 256),
+            nn.BatchNorm1d(256),  # Added batch normalization
             nn.ReLU(),
             nn.Dropout(0.2),
             nn.Linear(256, 128),
+            nn.BatchNorm1d(128),  # Added batch normalization
             nn.ReLU(),
             nn.Dropout(0.2),
-            nn.Linear(128, 1)
+            nn.Linear(128, 64),
+            nn.BatchNorm1d(64),   # Added batch normalization
+            nn.ReLU(),
+            nn.Linear(64, 1),
+            nn.Tanh()  # Added tanh activation to ensure output is between -1 and 1
         )
     
     def forward(self, theta_patch: torch.Tensor, f_patch: torch.Tensor,
                 boundary_values: torch.Tensor) -> torch.Tensor:
         """
         Forward pass through the network.
+        All inputs are expected to be scaled between -1 and 1.
+        Output will be scaled between -1 and 1.
         
         Args:
-            theta_patch: Patch of theta values (B, 1, H, W)
-            f_patch: Patch of f values (B, 1, H, W)
-            boundary_values: Global boundary values (B, N)
+            theta_patch: Patch of theta values (B, 1, H, W), scaled between -1 and 1
+            f_patch: Patch of f values (B, 1, H, W), scaled between -1 and 1
+            boundary_values: Global boundary values (B, N), scaled between -1 and 1
             
         Returns:
-            torch.Tensor: Predicted interface values (B, 1)
+            torch.Tensor: Predicted interface values (B, 1), scaled between -1 and 1
         """
         # Process patches through CNNs
         theta_features = self.theta_conv(theta_patch)
@@ -127,12 +140,13 @@ class InterfaceNetV2(nn.Module):
         # Concatenate all features
         combined = torch.cat([theta_flat, f_flat, boundary_values], dim=1)
         
-        # Final prediction
+        # Final prediction (will be between -1 and 1 due to tanh activation)
         return self.fc(combined)
 
 class InterfacePredictorV2:
     """
     Enhanced predictor class for training and using the InterfaceNetV2 model.
+    Handles scaled data between -1 and 1.
     """
     
     def __init__(self, patch_size: int = 3, device: str = 'cuda' if torch.cuda.is_available() else 'cpu'):
@@ -146,7 +160,10 @@ class InterfacePredictorV2:
         self.device = device
         self.patch_size = patch_size
         self.model = InterfaceNetV2(patch_size=patch_size).to(device)
-        self.optimizer = torch.optim.Adam(self.model.parameters())
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode='min', factor=0.5, patience=5, verbose=True
+        )
         self.criterion = nn.MSELoss()
         
         # Training history
@@ -156,11 +173,11 @@ class InterfacePredictorV2:
     def train(self, train_data: List[Dict], val_data: Optional[List[Dict]] = None,
              n_epochs: int = 100, batch_size: int = 32, patience: int = 10):
         """
-        Train the model.
+        Train the model on scaled data.
         
         Args:
-            train_data: Training dataset
-            val_data: Validation dataset
+            train_data: Training dataset (with scaled values)
+            val_data: Validation dataset (with scaled values)
             n_epochs: Number of training epochs
             batch_size: Batch size
             patience: Early stopping patience
@@ -210,6 +227,7 @@ class InterfacePredictorV2:
             if val_data is not None:
                 val_loss = self.evaluate(val_loader)
                 self.val_losses.append(val_loss)
+                self.scheduler.step(val_loss)  # Update learning rate based on validation loss
                 
                 print(f'Epoch {epoch+1}: Train Loss = {avg_train_loss:.6f}, '
                       f'Val Loss = {val_loss:.6f}')

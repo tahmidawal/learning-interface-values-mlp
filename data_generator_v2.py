@@ -5,6 +5,7 @@ class DataGeneratorV2:
     """
     Enhanced data generator for ML interface prediction using analytical solutions.
     Uses constant theta=1 and analytical solutions from sine functions.
+    All values are scaled to be between -1 and 1.
     """
     
     def __init__(self, nx: int = 40, ny: int = 40, n_subdomains: Tuple[int, int] = (2, 2),
@@ -34,21 +35,37 @@ class DataGeneratorV2:
         
         # Wavenumbers for solution generation
         self.k_values = np.arange(0.5, 8.5, 0.5)
+        
+        # Initialize scaling factors
+        self.scale_factors = {
+            'theta': {'min': 0.5, 'max': 1.5},  # Theta will be scaled around 1
+            'solution': {'min': -1.0, 'max': 1.0},  # Solution and BCs between -1 and 1
+            'f': {'min': -1.0, 'max': 1.0}  # Source term between -1 and 1
+        }
+    
+    def scale_array(self, arr: np.ndarray, target_min: float = -1.0, target_max: float = 1.0) -> np.ndarray:
+        """Scale array to target range."""
+        arr_min = np.min(arr)
+        arr_max = np.max(arr)
+        
+        # Handle constant arrays
+        if arr_min == arr_max:
+            return np.zeros_like(arr) if arr_min == 0 else np.ones_like(arr) * target_min
+        
+        return (arr - arr_min) * (target_max - target_min) / (arr_max - arr_min) + target_min
     
     def generate_random_problem(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Generate random problem with analytical solution.
-        Uses constant theta=1 and generates solution as sum of sine functions.
+        All values are scaled to be between -1 and 1.
+        The PDE is properly scaled to ensure consistent solutions.
         
         Returns:
             Tuple[np.ndarray, np.ndarray, np.ndarray]: theta, f, and analytical solution
         """
-        # Constant theta = 1
-        theta = np.ones((self.ny, self.nx))
-        
         # Generate random coefficients and k values for the solution
-        n_terms = np.random.randint(1, 4)  # Use 1-3 terms
-        coefficients = np.random.uniform(0.1, 1.0, n_terms)
+        n_terms = np.random.randint(1, 3)  # Use 1-2 terms for simpler solutions
+        coefficients = np.random.uniform(0.1, 0.2, n_terms)  # Further reduced coefficient range
         k_indices = np.random.choice(len(self.k_values), size=(n_terms, 2), replace=True)
         
         # Initialize solution and source term
@@ -65,54 +82,49 @@ class DataGeneratorV2:
             u += u_term
             
             # Source term: -A*(k₁²+k₂²)*(2π)²*sin(k₁*2πx)*sin(k₂*2πy)
-            # This comes from -∇²u when theta=1
-            f_term = -coef * (k1**2 + k2**2) * (2 * np.pi)**2 * np.sin(k1 * 2 * np.pi * self.X) * np.sin(k2 * 2 * np.pi * self.Y)
+            # Scale down the source term to match the solution scale
+            k_factor = (k1**2 + k2**2) * (2 * np.pi)**2
+            f_term = -coef * np.sin(k1 * 2 * np.pi * self.X) * np.sin(k2 * 2 * np.pi * self.Y)
             f += f_term
         
-        return theta, f, u
+        # Generate theta very close to 1 for better scaling
+        theta = np.ones((self.ny, self.nx)) + 0.01 * np.random.randn(self.ny, self.nx)
+        theta = np.clip(theta, 0.95, 1.05)  # Very small variations around 1
+        
+        # Scale the arrays
+        u_scaled = self.scale_array(u)
+        f_scaled = self.scale_array(f)
+        theta_scaled = self.scale_array(theta, self.scale_factors['theta']['min'], self.scale_factors['theta']['max'])
+        
+        return theta_scaled, f_scaled, u_scaled
     
     def generate_boundary_conditions(self, u: np.ndarray) -> Dict[str, Callable]:
         """
         Generate boundary conditions from the analytical solution.
+        The solution u is already scaled between -1 and 1.
         
         Args:
-            u: Analytical solution array
+            u: Scaled analytical solution array
             
         Returns:
             Dict[str, callable]: Dictionary of boundary condition functions
         """
         # Create interpolation functions for the boundaries
         def bc_left(y):
-            if isinstance(y, (float, int)):
-                y_idx = int(y * (self.ny - 1))
-                return float(u[y_idx, 0])
-            else:
-                y_idx = np.clip((y * (self.ny - 1)).astype(int), 0, self.ny - 1)
-                return u[y_idx, 0]
+            y_idx = int(y * (self.ny - 1))
+            return float(u[y_idx, 0])
         
         def bc_right(y):
-            if isinstance(y, (float, int)):
-                y_idx = int(y * (self.ny - 1))
-                return float(u[y_idx, -1])
-            else:
-                y_idx = np.clip((y * (self.ny - 1)).astype(int), 0, self.ny - 1)
-                return u[y_idx, -1]
+            y_idx = int(y * (self.ny - 1))
+            return float(u[y_idx, -1])
         
         def bc_bottom(x):
-            if isinstance(x, (float, int)):
-                x_idx = int(x * (self.nx - 1))
-                return float(u[0, x_idx])
-            else:
-                x_idx = np.clip((x * (self.nx - 1)).astype(int), 0, self.nx - 1)
-                return u[0, x_idx]
+            x_idx = int(x * (self.nx - 1))
+            return float(u[0, x_idx])
         
         def bc_top(x):
-            if isinstance(x, (float, int)):
-                x_idx = int(x * (self.nx - 1))
-                return float(u[-1, x_idx])
-            else:
-                x_idx = np.clip((x * (self.nx - 1)).astype(int), 0, self.nx - 1)
-                return u[-1, x_idx]
+            x_idx = int(x * (self.nx - 1))
+            return float(u[-1, x_idx])
         
         return {
             'left': bc_left,
@@ -231,10 +243,10 @@ class DataGeneratorV2:
         dataset = []
         
         for _ in range(n_samples):
-            # Generate random problem with analytical solution
+            # Generate random problem with scaled values
             theta, f, solution = self.generate_random_problem()
             
-            # Generate boundary conditions from solution
+            # Generate boundary conditions from scaled solution
             bc_dict = self.generate_boundary_conditions(solution)
             
             # Extract interface data
@@ -246,7 +258,8 @@ class DataGeneratorV2:
                 'f': f,
                 'solution': solution,
                 'interface_data': interface_data,
-                'bc_dict': bc_dict
+                'bc_dict': bc_dict,
+                'scale_factors': self.scale_factors
             })
         
         return dataset 

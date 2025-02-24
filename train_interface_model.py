@@ -5,6 +5,7 @@ import torch
 import matplotlib.pyplot as plt
 from typing import Dict, List
 import os
+from test_interface_model import plot_interface_predictions
 
 def split_dataset(data: List[Dict], train_ratio: float = 0.8,
                  val_ratio: float = 0.1) -> tuple[List[Dict], List[Dict], List[Dict]]:
@@ -76,21 +77,34 @@ def plot_prediction_comparison(predictions: np.ndarray, targets: np.ndarray):
     plt.show()
 
 def main():
+    """
+    Main training function.
+    All data is scaled between -1 and 1 for better training stability.
+    """
     # Set random seeds for reproducibility
     np.random.seed(42)
     torch.manual_seed(42)
     
-    # Create data generator
+    # Create data generator with scaled data
+    print("Initializing data generator...")
     data_gen = DataGeneratorV2(nx=40, ny=40, n_subdomains=(2, 2), patch_size=5)
     
-    # Generate dataset
-    print("Generating dataset...")
-    n_samples = 1000  # Number of PDE problems to generate
+    # Generate dataset with scaled values
+    print("Generating scaled dataset...")
+    n_samples = 2000
     dataset = data_gen.generate_dataset(n_samples)
+    print(f"Generated {n_samples} samples with values scaled between -1 and 1")
     
     # Split dataset
     print("Splitting dataset...")
-    train_data, val_data, test_data = split_dataset(dataset)
+    train_size = int(0.8 * len(dataset))
+    val_size = int(0.1 * len(dataset))
+    test_size = len(dataset) - train_size - val_size
+    
+    train_data = dataset[:train_size]
+    val_data = dataset[train_size:train_size + val_size]
+    test_data = dataset[train_size + val_size:]
+    
     print(f"Dataset sizes: Train={len(train_data)}, Val={len(val_data)}, Test={len(test_data)}")
     
     # Initialize model
@@ -100,19 +114,23 @@ def main():
     # Create models directory if it doesn't exist
     os.makedirs('models', exist_ok=True)
     
-    # Train model
+    # Train model with scaled data
     print("Training model...")
     predictor.train(
         train_data=train_data,
         val_data=val_data,
-        n_epochs=100,
-        batch_size=32,
-        patience=10
+        n_epochs=200,
+        batch_size=64,
+        patience=15
     )
     
-    # Save model
-    print("Saving model...")
-    predictor.save_model('models/interface_predictor_v2.pth')
+    # Save model and scaling factors
+    print("Saving model and scaling information...")
+    model_info = {
+        'model_state': predictor.model.state_dict(),
+        'scale_factors': data_gen.scale_factors
+    }
+    torch.save(model_info, 'models/interface_predictor_v2.pth')
     
     # Plot training history
     predictor.plot_training_history()
@@ -121,28 +139,30 @@ def main():
     print("\nEvaluating model on test set...")
     metrics = evaluate_model(predictor, test_data)
     
-    print("\nTest Set Metrics:")
+    print("\nTest Set Metrics (on scaled data):")
     print(f"Mean Absolute Error: {metrics['mae']:.6f}")
     print(f"Root Mean Square Error: {metrics['rmse']:.6f}")
     print(f"Maximum Error: {metrics['max_error']:.6f}")
     print(f"Mean Relative Error: {metrics['mean_rel_error']:.6f}")
     print(f"Median Relative Error: {metrics['median_rel_error']:.6f}")
     
-    # Plot some predictions
+    # Collect predictions for visualization
     all_predictions = []
     all_targets = []
+    all_positions = []
+    all_types = []
     
     for problem in test_data[:10]:  # Use first 10 test problems
         for interface_point in problem['interface_data']:
             pred = predictor.predict(interface_point)
-            target = interface_point['target']
             all_predictions.append(pred)
-            all_targets.append(target)
+            all_targets.append(interface_point['target'])
+            all_positions.append(interface_point['position'])
+            all_types.append(interface_point['type'])
     
-    plot_prediction_comparison(
-        np.array(all_predictions),
-        np.array(all_targets)
-    )
+    # Plot predictions
+    plot_interface_predictions(all_predictions, all_targets, all_positions,
+                             all_types, data_gen.scale_factors)
 
 if __name__ == "__main__":
     main() 

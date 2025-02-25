@@ -28,6 +28,9 @@ def generate_test_case(data_gen: DataGeneratorV3, k: float):
     theta_scaled = data_gen.scale_array(theta, data_gen.scale_factors['theta']['min'], 
                                       data_gen.scale_factors['theta']['max'])
     
+    # Multiply u_exact by -1 to invert the solution
+    u_scaled = -1 * u_scaled
+    
     return theta_scaled, -f_scaled, u_scaled  # Negate f to match ∇·(θ∇u) = f
 
 def scale_to_reference(solution: np.ndarray, reference: np.ndarray) -> np.ndarray:
@@ -186,6 +189,52 @@ class InterfacePredictor(nn.Module):
             output = self.forward(theta_patch, f_patch)
             return float(output.item())
 
+def plot_interface_values(u_exact, u_direct, u_combined, k, results_dir):
+    """Plot interface values comparing exact, direct, and ML-based solutions."""
+    # Create figure for interface value plots
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Get coordinates
+    ny, nx = u_exact.shape
+    y_coords = np.arange(ny)
+    x_coords = np.arange(nx)
+    
+    # Vertical interface (middle of x-axis)
+    vertical_interface_x = nx // 2
+    exact_vertical = u_exact[:, vertical_interface_x]
+    direct_vertical = u_direct[:, vertical_interface_x]
+    ml_vertical = u_combined[:, vertical_interface_x]
+    
+    # Plot vertical interface values
+    ax1.plot(y_coords, exact_vertical, 'b-', linewidth=2, label='Exact Solution')
+    ax1.plot(y_coords, direct_vertical, 'r--', linewidth=2, label='Direct Solution')
+    ax1.plot(y_coords, ml_vertical, 'g:', linewidth=2, label='ML-Based Solution')
+    ax1.grid(True)
+    ax1.set_xlabel('Y coordinate')
+    ax1.set_ylabel('Solution value')
+    ax1.set_title(f'Values along Vertical Interface (x={vertical_interface_x})')
+    ax1.legend()
+    
+    # Horizontal interface (middle of y-axis)
+    horizontal_interface_y = ny // 2
+    exact_horizontal = u_exact[horizontal_interface_y, :]
+    direct_horizontal = u_direct[horizontal_interface_y, :]
+    ml_horizontal = u_combined[horizontal_interface_y, :]
+    
+    # Plot horizontal interface values
+    ax2.plot(x_coords, exact_horizontal, 'b-', linewidth=2, label='Exact Solution')
+    ax2.plot(x_coords, direct_horizontal, 'r--', linewidth=2, label='Direct Solution')
+    ax2.plot(x_coords, ml_horizontal, 'g:', linewidth=2, label='ML-Based Solution')
+    ax2.grid(True)
+    ax2.set_xlabel('X coordinate')
+    ax2.set_ylabel('Solution value')
+    ax2.set_title(f'Values along Horizontal Interface (y={horizontal_interface_y})')
+    ax2.legend()
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(results_dir, f'k_{k}_interface_values_comparison.png'))
+    plt.close()
+
 def main():
     try:
         # Create results directory
@@ -307,6 +356,9 @@ def main():
             global_error = np.abs(u_exact - u_combined)
             global_mae = np.mean(global_error)
             
+            # Plot interface values comparison
+            plot_interface_values(u_exact, u_direct, u_combined, k, results_dir)
+            
             # Plot results
             fig = plt.figure(figsize=(20, 20))
             gs = plt.GridSpec(4, 4)
@@ -324,11 +376,15 @@ def main():
             ax_direct = fig.add_subplot(gs[0, 3])
             plot_field(u_direct, f'Direct Solution\nMAE={direct_mae:.6f}', ax_direct)
             
-            ax_pred = fig.add_subplot(gs[1, :2])
+            ax_pred = fig.add_subplot(gs[1, 0])
             plot_field(u_combined, f'ML-Based Solution\nMAE={global_mae:.6f}', ax_pred)
             
-            ax_direct_err = fig.add_subplot(gs[1, 2:])
+            ax_direct_err = fig.add_subplot(gs[1, 1])
             plot_field(direct_error, f'Direct Solution Error\nMax={direct_error.max():.6f}', ax_direct_err)
+            
+            # Add ML-Based Solution Error plot
+            ax_ml_err = fig.add_subplot(gs[1, 2:])
+            plot_field(global_error, f'ML-Based Solution Error\nMax={global_error.max():.6f}', ax_ml_err)
             
             # Plot subdomain results
             for si in range(2):
